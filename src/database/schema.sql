@@ -108,6 +108,10 @@ CREATE TABLE pois (
     verified_by UUID REFERENCES users(id),
     verified_at TIMESTAMP WITH TIME ZONE,
     created_by UUID REFERENCES users(id),
+    approval_status VARCHAR(20) DEFAULT 'pending', -- pending, approved, rejected, needs_review
+    rejection_reason TEXT,
+    reviewed_by UUID REFERENCES users(id),
+    reviewed_at TIMESTAMP WITH TIME ZONE,
     status VARCHAR(20) DEFAULT 'active',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -493,6 +497,269 @@ CREATE TRIGGER update_drivers_updated_at BEFORE UPDATE ON drivers
 
 CREATE TRIGGER update_pois_updated_at BEFORE UPDATE ON pois
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Location-based functions for nearby drivers and guides
+CREATE OR REPLACE FUNCTION find_nearby_drivers(
+    user_lat DECIMAL,
+    user_lng DECIMAL,
+    radius_km DECIMAL DEFAULT 10,
+    limit_count INTEGER DEFAULT 10
+)
+RETURNS TABLE (
+    id UUID,
+    user_id UUID,
+    vehicle_type VARCHAR,
+    vehicle_number VARCHAR,
+    base_rate DECIMAL,
+    rating DECIMAL,
+    distance_km DECIMAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        d.id,
+        d.user_id,
+        d.vehicle_type,
+        d.vehicle_number,
+        d.base_rate,
+        d.rating,
+        (
+            6371 * acos(
+                cos(radians(user_lat)) * 
+                cos(radians(d.current_lat)) * 
+                cos(radians(d.current_lng) - radians(user_lng)) + 
+                sin(radians(user_lat)) * 
+                sin(radians(d.current_lat))
+            )
+        )::DECIMAL(10,2) AS distance_km
+    FROM drivers d
+    WHERE d.is_online = TRUE
+        AND d.current_lat IS NOT NULL
+        AND d.current_lng IS NOT NULL
+        AND (
+            6371 * acos(
+                cos(radians(user_lat)) * 
+                cos(radians(d.current_lat)) * 
+                cos(radians(d.current_lng) - radians(user_lng)) + 
+                sin(radians(user_lat)) * 
+                sin(radians(d.current_lat))
+            )
+        ) <= radius_km
+    ORDER BY distance_km
+    LIMIT limit_count;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION find_nearby_guides(
+    user_lat DECIMAL,
+    user_lng DECIMAL,
+    radius_km DECIMAL DEFAULT 10,
+    limit_count INTEGER DEFAULT 10
+)
+RETURNS TABLE (
+    id UUID,
+    user_id UUID,
+    languages TEXT[],
+    hourly_rate DECIMAL,
+    rating DECIMAL,
+    distance_km DECIMAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        g.id,
+        g.user_id,
+        g.languages,
+        g.hourly_rate,
+        g.rating,
+        (
+            6371 * acos(
+                cos(radians(user_lat)) * 
+                cos(radians(g.current_lat)) * 
+                cos(radians(g.current_lng) - radians(user_lng)) + 
+                sin(radians(user_lat)) * 
+                sin(radians(g.current_lat))
+            )
+        )::DECIMAL(10,2) AS distance_km
+    FROM guides g
+    WHERE g.is_available = TRUE
+        AND g.current_lat IS NOT NULL
+        AND g.current_lng IS NOT NULL
+        AND (
+            6371 * acos(
+                cos(radians(user_lat)) * 
+                cos(radians(g.current_lat)) * 
+                cos(radians(g.current_lng) - radians(user_lng)) + 
+                sin(radians(user_lat)) * 
+                sin(radians(g.current_lat))
+            )
+        ) <= radius_km
+    ORDER BY distance_km
+    LIMIT limit_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to check if POI is similar to existing POIs (for admin approval)
+CREATE OR REPLACE FUNCTION check_poi_similarity(
+    poi_name VARCHAR,
+    poi_lat DECIMAL,
+    poi_lng DECIMAL,
+    similarity_threshold DECIMAL DEFAULT 0.3, -- Location radius in km (300 meters)
+    name_similarity_threshold DECIMAL DEFAULT 0.7 -- Name similarity ratio (70% similar)
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    similar_count INTEGER;
+    normalized_new_name VARCHAR;
+    normalized_existing_name VARCHAR;
+BEGIN
+    -- Normalize names: lowercase, trim, remove extra spaces
+    normalized_new_name := LOWER(TRIM(REGEXP_REPLACE(poi_name, '\s+', ' ', 'g')));
+    
+    SELECT COUNT(*) INTO similar_count
+    FROM pois p
+    WHERE p.status IN ('active', 'approved')
+        AND (
+            -- Check location proximity (within 300 meters by default)
+            (
+                6371 * acos(
+                    cos(radians(poi_lat)) * 
+                    cos(radians(p.latitude)) * 
+                    cos(radians(p.longitude) - radians(poi_lng)) + 
+                    sin(radians(poi_lat)) * 
+                    sin(radians(p.latitude))
+                )
+            ) <= similarity_threshold
+            OR
+            -- Check name similarity (normalized, case-insensitive)
+            (
+                LENGTH(normalized_new_name) > 0 
+                AND LENGTH(p.name) > 0
+                AND (
+                    -- Exact match (case-insensitive)
+                    normalized_new_name = LOWER(TRIM(REGEXP_REPLACE(p.name, '\s+', ' ', 'g')))
+                    OR
+                    -- Similarity check: normalized Levenshtein distance
+                    (
+                        ABS(LENGTH(normalized_new_name) - LENGTH(LOWER(TRIM(REGEXP_REPLACE(p.name, '\s+', ' ', 'g')))))::DECIMAL /
+                        GREATEST(LENGTH(normalized_new_name), LENGTH(LOWER(TRIM(REGEXP_REPLACE(p.name, '\s+', ' ', 'g')))))::DECIMAL
+                    ) <= (1 - name_similarity_threshold)
+                )
+            )
+        );
+    
+    RETURN similar_count > 0;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to check if names are similar (handles common variations)
+CREATE OR REPLACE FUNCTION names_are_similar(
+    name1 VARCHAR,
+    name2 VARCHAR
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    norm_name1 VARCHAR;
+    norm_name2 VARCHAR;
+    similarity_ratio DECIMAL;
+BEGIN
+    -- Normalize both names
+    norm_name1 := LOWER(TRIM(REGEXP_REPLACE(name1, '[^a-zA-Z0-9\s]', '', 'g')));
+    norm_name2 := LOWER(TRIM(REGEXP_REPLACE(name2, '[^a-zA-Z0-9\s]', '', 'g')));
+    
+    -- Remove common words for comparison
+    norm_name1 := REGEXP_REPLACE(norm_name1, '\b(temple|shrine|museum|park|beach|lake|mountain|hill|river|cave)\b', '', 'gi');
+    norm_name2 := REGEXP_REPLACE(norm_name2, '\b(temple|shrine|museum|park|beach|lake|mountain|hill|river|cave)\b', '', 'gi');
+    
+    -- Trim extra spaces
+    norm_name1 := TRIM(REGEXP_REPLACE(norm_name1, '\s+', ' ', 'g'));
+    norm_name2 := TRIM(REGEXP_REPLACE(norm_name2, '\s+', ' ', 'g'));
+    
+    -- Calculate similarity based on common characters
+    IF norm_name1 = norm_name2 THEN
+        RETURN TRUE;
+    END IF;
+    
+    -- If one is substring of another or vice versa
+    IF POSITION(norm_name1 IN norm_name2) > 0 OR POSITION(norm_name2 IN norm_name1) > 0 THEN
+        RETURN TRUE;
+    END IF;
+    
+    -- Check length similarity (if close in length and share most chars)
+    similarity_ratio := LEAST(LENGTH(norm_name1), LENGTH(norm_name2))::DECIMAL / 
+                        GREATEST(LENGTH(norm_name1), LENGTH(norm_name2))::DECIMAL;
+    
+    IF similarity_ratio > 0.6 THEN
+        RETURN TRUE;
+    END IF;
+    
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to automatically approve or flag POIs
+CREATE OR REPLACE FUNCTION auto_approve_poi()
+RETURNS TRIGGER AS $$
+DECLARE
+    similar_count INTEGER;
+    close_poi_count INTEGER;
+BEGIN
+    -- Check for POIs within 300 meters
+    SELECT COUNT(*) INTO close_poi_count
+    FROM pois p
+    WHERE p.status IN ('active', 'approved')
+        AND (
+            6371 * acos(
+                cos(radians(NEW.latitude)) * 
+                cos(radians(p.latitude)) * 
+                cos(radians(p.longitude) - radians(NEW.longitude)) + 
+                sin(radians(NEW.latitude)) * 
+                sin(radians(p.latitude))
+            )
+        ) <= 0.3;
+    
+    -- If there's a POI within 300 meters, check if names are similar
+    IF close_poi_count > 0 THEN
+        SELECT COUNT(*) INTO similar_count
+        FROM pois p
+        WHERE p.status IN ('active', 'approved')
+            AND (
+                6371 * acos(
+                    cos(radians(NEW.latitude)) * 
+                    cos(radians(p.latitude)) * 
+                    cos(radians(p.longitude) - radians(NEW.longitude)) + 
+                    sin(radians(NEW.latitude)) * 
+                    sin(radians(p.latitude))
+                )
+            ) <= 0.3
+            AND names_are_similar(NEW.name, p.name);
+        
+        IF similar_count > 0 THEN
+            -- Flag for admin review if similar name and location
+            NEW.approval_status := 'needs_review';
+        ELSE
+            -- Same location but different name - auto approve
+            NEW.approval_status := 'approved';
+        END IF;
+    ELSE
+        -- No POI nearby - auto approve
+        NEW.approval_status := 'approved';
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to automatically set approval status on insert
+DROP TRIGGER IF EXISTS auto_approve_poi_trigger ON pois;
+CREATE TRIGGER auto_approve_poi_trigger
+    BEFORE INSERT ON pois
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_approve_poi();
+
+-- Create index for location-based queries
+CREATE INDEX idx_pois_approval_status ON pois(approval_status);
+CREATE INDEX idx_pois_location ON pois(latitude, longitude);
 
 CREATE TRIGGER update_bookings_updated_at BEFORE UPDATE ON bookings
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
