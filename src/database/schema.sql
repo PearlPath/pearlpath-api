@@ -289,12 +289,12 @@ CREATE INDEX idx_reviews_booking_id ON reviews(booking_id);
 CREATE INDEX idx_reviews_reviewee_id ON reviews(reviewee_id);
 
 CREATE INDEX idx_community_updates_type ON community_updates(type);
-CREATE INDEX idx_community_updates_location ON community_updates USING GIST((location::geometry));
+CREATE INDEX idx_community_updates_location ON community_updates USING gin(location);
 CREATE INDEX idx_community_updates_status ON community_updates(status);
 
 CREATE INDEX idx_events_dates ON events(start_date, end_date);
 CREATE INDEX idx_events_category ON events(category);
-CREATE INDEX idx_events_location ON events USING GIST((location::geometry));
+CREATE INDEX idx_events_location ON events USING gin(location);
 
 CREATE INDEX idx_payments_booking_id ON payments(booking_id);
 CREATE INDEX idx_payments_user_id ON payments(user_id);

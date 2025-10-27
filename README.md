@@ -129,8 +129,10 @@ src/
    ```
 
 4. **Database Setup**
-   - Create a new Supabase project
-   - Run the SQL schema from `src/database/schema.sql` in your Supabase SQL editor
+   - Create a new Supabase project at https://supabase.com
+   - Open SQL Editor in your Supabase dashboard
+   - If starting fresh: Run `src/database/schema.sql` to create all tables
+   - If resetting: Run `src/database/drop_all.sql` first, then `src/database/schema.sql`
    - Update your Supabase credentials in the `.env` file
 
 5. **Start the development server**
