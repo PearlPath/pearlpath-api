@@ -1,4 +1,4 @@
--- DROP ALL - PearlPath Database Reset
+-- Drop All - PearlPath Database Reset
 -- Run this in Supabase SQL Editor to completely remove all tables and functions
 
 -- Drop triggers
