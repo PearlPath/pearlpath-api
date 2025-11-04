@@ -312,6 +312,106 @@ const deletePOI = async (req, res, next) => {
   }
 };
 
+// Approve POI (Admin only)
+const approvePOI = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    const poi = await POI.findById(id);
+    if (!poi) {
+      throw handleNotFoundError('POI not found');
+    }
+
+    await poi.approve(userId);
+
+    logger.info(`POI approved: ${id} by user: ${userId}`);
+
+    res.json(responseUtils.success({
+      poi: poi.toSafeObject()
+    }, 'POI approved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Reject POI (Admin only)
+const rejectPOI = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const userId = req.user.id;
+
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    if (!reason) {
+      return res.status(400).json(responseUtils.error('Rejection reason is required', 400));
+    }
+
+    const poi = await POI.findById(id);
+    if (!poi) {
+      throw handleNotFoundError('POI not found');
+    }
+
+    await poi.reject(userId, reason);
+
+    logger.info(`POI rejected: ${id} by user: ${userId}, reason: ${reason}`);
+
+    res.json(responseUtils.success({
+      poi: poi.toSafeObject()
+    }, 'POI rejected successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get POIs pending review (Admin only)
+const getPOIsForReview = async (req, res, next) => {
+  try {
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    const pois = await POI.findByApprovalStatus('needs_review');
+
+    res.json(responseUtils.success({
+      pois: pois.map(poi => poi.toSafeObject()),
+      total: pois.length
+    }, 'POIs pending review retrieved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get all POI approval statuses
+const getPOIApprovalStats = async (req, res, next) => {
+  try {
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    const pending = await POI.findByApprovalStatus('pending');
+    const needsReview = await POI.findByApprovalStatus('needs_review');
+    const approved = await POI.findByApprovalStatus('approved');
+    const rejected = await POI.findByApprovalStatus('rejected');
+
+    res.json(responseUtils.success({
+      pending: pending.length,
+      needsReview: needsReview.length,
+      approved: approved.length,
+      rejected: rejected.length
+    }, 'POI approval stats retrieved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createPOI,
   getPOI,
@@ -323,5 +423,9 @@ module.exports = {
   verifyPOI,
   getPOIStatus,
   getPOIsByCategory,
-  deletePOI
+  deletePOI,
+  approvePOI,
+  rejectPOI,
+  getPOIsForReview,
+  getPOIApprovalStats
 };
