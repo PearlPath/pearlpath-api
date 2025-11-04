@@ -2,19 +2,49 @@ const POI = require('../models/POI');
 const { responseUtils } = require('../utils/helpers');
 const { handleNotFoundError } = require('../middleware/errorMiddleware');
 const logger = require('../utils/logger');
+const locationService = require('../services/locationService');
+const { cache } = require('../config/cache');
 
-// Create POI
+// Create POI with photo/video verification requirement
 const createPOI = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const poiData = { ...req.body, createdBy: userId };
+
+    // Require photo/video verification for all contributions
+    if (!poiData.images || poiData.images.length === 0) {
+      return res.status(400).json(responseUtils.error(
+        'Photo verification required. Please upload at least one image.',
+        400
+      ));
+    }
+
+    // Validate minimum image requirement (at least 1 photo)
+    if (poiData.images.length < 1) {
+      return res.status(400).json(responseUtils.error(
+        'At least one verification photo is required',
+        400
+      ));
+    }
+
+    // Check if location is in Sri Lanka
+    if (!locationService.isInSriLanka(poiData.latitude, poiData.longitude)) {
+      return res.status(400).json(responseUtils.error(
+        'POI must be located in Sri Lanka',
+        400
+      ));
+    }
 
     const poi = await POI.create(poiData);
 
     logger.info(`POI created: ${poi.id} by user: ${userId}`);
 
     res.status(201).json(responseUtils.success({
-      poi: poi.toSafeObject()
+      poi: poi.toSafeObject(),
+      approvalStatus: poi.approvalStatus,
+      message: poi.approvalStatus === 'needs_review' 
+        ? 'POI submitted for review due to similarity with existing locations'
+        : 'POI created and auto-approved'
     }, 'POI created successfully', 201));
   } catch (error) {
     next(error);
@@ -113,13 +143,36 @@ const searchPOIs = async (req, res, next) => {
   }
 };
 
-// Find nearby POIs
+// Find nearby POIs with enhanced features
 const findNearbyPOIs = async (req, res, next) => {
   try {
-    const { lat, lng, radius = 10, category } = req.query;
+    const { 
+      lat, 
+      lng, 
+      radius = 10, 
+      category,
+      filters = {},
+      includeWeather = false,
+      includeCrowdLevel = false 
+    } = req.query;
 
     if (!lat || !lng) {
       return res.status(400).json(responseUtils.error('Latitude and longitude are required', 400));
+    }
+
+    // Validate coordinates
+    const coordValidation = locationService.validateCoordinates(lat, lng);
+    if (!coordValidation.valid) {
+      return res.status(400).json(responseUtils.error(coordValidation.error, 400));
+    }
+
+    // Check cache first for performance
+    const cacheKey = `nearby_pois_${lat}_${lng}_${radius}_${category || 'all'}`;
+    const cachedResult = await cache.get(cacheKey);
+    
+    if (cachedResult) {
+      logger.debug(`Cache hit for nearby POIs: ${cacheKey}`);
+      return res.json(responseUtils.success(cachedResult, 'Nearby POIs found (cached)'));
     }
 
     const pois = await POI.findNearby(
@@ -129,20 +182,52 @@ const findNearbyPOIs = async (req, res, next) => {
       category
     );
 
-    // Calculate distances and add to response
-    const poisWithDistance = pois.map(poi => {
+    // Calculate distances and add enhanced data
+    const poisWithEnhancedData = await Promise.all(pois.map(async (poi) => {
       const distance = poi.calculateDistance(parseFloat(lat), parseFloat(lng));
-      return {
+      const poiData = {
         ...poi.toPublicObject(),
-        distance: distance ? Math.round(distance * 100) / 100 : null
+        distance: distance ? Math.round(distance * 100) / 100 : null,
+        distanceText: distance ? `${Math.round(distance * 10) / 10}km away` : null,
+        currentStatus: poi.getCurrentStatus()
       };
-    });
 
-    res.json(responseUtils.success({
-      pois: poisWithDistance,
-      total: poisWithDistance.length,
-      searchParams: { lat, lng, radius, category }
-    }, 'Nearby POIs found successfully'));
+      // Add crowd level if requested
+      if (includeCrowdLevel) {
+        poiData.crowdLevel = await getCrowdLevel(poi.id);
+      }
+
+      // Add recent safety updates
+      poiData.recentAlerts = await getRecentSafetyAlerts(poi.id);
+
+      return poiData;
+    }));
+
+    // Get current weather if requested
+    let weatherData = null;
+    if (includeWeather) {
+      try {
+        weatherData = await locationService.getCurrentWeather(parseFloat(lat), parseFloat(lng));
+      } catch (error) {
+        logger.warn('Failed to fetch weather data:', error);
+      }
+    }
+
+    const result = {
+      pois: poisWithEnhancedData,
+      total: poisWithEnhancedData.length,
+      weather: weatherData,
+      searchParams: { lat, lng, radius, category },
+      userLocation: {
+        lat: parseFloat(lat),
+        lng: parseFloat(lng)
+      }
+    };
+
+    // Cache results for 5 minutes
+    await cache.set(cacheKey, result, 300);
+
+    res.json(responseUtils.success(result, 'Nearby POIs found successfully'));
   } catch (error) {
     next(error);
   }
