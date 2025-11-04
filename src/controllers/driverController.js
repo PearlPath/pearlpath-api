@@ -531,6 +531,171 @@ const deleteDriver = async (req, res, next) => {
   }
 };
 
+// Update subscription tier (Freemium/Premium)
+const updateSubscriptionTier = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { subscriptionTier, paymentId } = req.body;
+    const userId = req.user.id;
+
+    const driver = await Driver.findById(id);
+    if (!driver) {
+      throw handleNotFoundError('Driver not found');
+    }
+
+    if (driver.userId !== userId) {
+      return res.status(403).json(responseUtils.error('Access denied', 403));
+    }
+
+    // Premium tier requires payment verification
+    if (subscriptionTier === 'premium' && !paymentId) {
+      return res.status(400).json(responseUtils.error('Payment verification required for premium tier', 400));
+    }
+
+    // Update subscription
+    const { data, error } = await db.supabase
+      .from('drivers')
+      .update({
+        subscription_tier: subscriptionTier,
+        subscription_updated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    logger.info(`Driver subscription updated: ${id} - ${subscriptionTier}`);
+
+    const premiumFeatures = subscriptionTier === 'premium' ? {
+      priorityInSearch: true,
+      featuredPlacement: true,
+      detailedAnalytics: true,
+      customBranding: true,
+      reducedCommission: '8% (instead of 10%)'
+    } : null;
+
+    res.json(responseUtils.success({
+      subscriptionTier,
+      premiumFeatures,
+      message: subscriptionTier === 'premium' ? 
+        'Premium subscription activated! You now have priority placement in search results.' :
+        'Subscription updated successfully'
+    }, 'Subscription updated successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get driver earnings dashboard
+const getDriverEarnings = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { period = '30' } = req.query;
+    const userId = req.user.id;
+
+    const driver = await Driver.findById(id);
+    if (!driver) {
+      throw handleNotFoundError('Driver not found');
+    }
+
+    if (driver.userId !== userId && !['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Access denied', 403));
+    }
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(period));
+
+    const earnings = await calculateDriverEarnings(id, startDate, new Date());
+
+    res.json(responseUtils.success({
+      earnings,
+      period: parseInt(period),
+      driver: {
+        id: driver.id,
+        totalRides: driver.totalRides,
+        rating: driver.rating,
+        subscriptionTier: driver.subscriptionTier || 'basic'
+      }
+    }, 'Earnings dashboard retrieved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get driver analytics (Premium feature)
+const getDriverAnalytics = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    const driver = await Driver.findById(id);
+    if (!driver) {
+      throw handleNotFoundError('Driver not found');
+    }
+
+    if (driver.userId !== userId) {
+      return res.status(403).json(responseUtils.error('Access denied', 403));
+    }
+
+    // Check if driver has premium subscription
+    if (driver.subscriptionTier !== 'premium') {
+      return res.status(403).json(responseUtils.error(
+        'Detailed analytics are only available for Premium subscribers. Upgrade to access this feature.',
+        403
+      ));
+    }
+
+    // Calculate analytics for last 30 days
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const { data: bookings, error } = await db.supabase
+      .from('bookings')
+      .select('*')
+      .eq('driver_id', id)
+      .eq('type', 'ride')
+      .gte('created_at', thirtyDaysAgo.toISOString());
+
+    if (error) throw error;
+
+    // Calculate various metrics
+    const analytics = {
+      overview: {
+        totalRides: bookings.length,
+        completedRides: bookings.filter(b => b.status === 'completed').length,
+        cancelledRides: bookings.filter(b => b.status === 'cancelled').length,
+        acceptanceRate: bookings.length > 0 ? 
+          Math.round((bookings.filter(b => b.status !== 'cancelled').length / bookings.length) * 100) : 0
+      },
+      earnings: {
+        totalRevenue: bookings.reduce((sum, b) => sum + parseFloat(b.total_amount || 0), 0),
+        averageRideValue: bookings.length > 0 ?
+          Math.round((bookings.reduce((sum, b) => sum + parseFloat(b.total_amount || 0), 0) / bookings.length) * 100) / 100 : 0
+      },
+      performance: {
+        averageRating: driver.rating,
+        totalReviews: driver.totalReviews,
+        onlineHours: calculateOnlineHours(bookings),
+        peakHours: identifyPeakHours(bookings)
+      },
+      geography: {
+        topPickupLocations: getTopLocations(bookings, 'pickup'),
+        topDropoffLocations: getTopLocations(bookings, 'dropoff')
+      }
+    };
+
+    res.json(responseUtils.success({
+      analytics,
+      period: '30 days',
+      subscriptionTier: 'premium'
+    }, 'Driver analytics retrieved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createDriver,
   getDriver,
