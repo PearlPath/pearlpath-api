@@ -6,6 +6,7 @@ const logger = require('../utils/logger');
 const { cache } = require('../config/cache');
 const { db } = require('../config/database');
 const locationService = require('../services/locationService');
+const { v4: uuidv4 } = require('uuid');
 
 // Create guide profile with KYC verification requirement
 const createGuide = async (req, res, next) => {
@@ -452,7 +453,7 @@ const upsertGuidePackage = async (req, res, next) => {
     const { data, error } = await db.supabase
       .from('guide_packages')
       .upsert({
-        id: packageData.id || require('uuid').v4(),
+        id: packageData.id || uuidv4(),
         guide_id: id,
         name: packageData.name,
         type: packageData.type, // half_day, full_day, multi_day, custom
