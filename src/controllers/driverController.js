@@ -834,3 +834,45 @@ async function calculateDriverEarnings(driverId, startDate, endDate) {
     };
   }
 }
+
+function calculateOnlineHours(bookings) {
+  // Estimate online hours based on rides (rough estimate: 2x total ride duration)
+  const totalRideDuration = bookings.reduce((sum, b) => sum + (b.duration || 0), 0);
+  return Math.round((totalRideDuration * 2) / 60); // Convert to hours
+}
+
+function identifyPeakHours(bookings) {
+  // Group bookings by hour to identify peak hours
+  const hourCounts = {};
+  bookings.forEach(b => {
+    const hour = new Date(b.created_at).getHours();
+    hourCounts[hour] = (hourCounts[hour] || 0) + 1;
+  });
+
+  // Find top 3 peak hours
+  const sorted = Object.entries(hourCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3);
+
+  return sorted.map(([hour, count]) => ({
+    hour: `${hour}:00`,
+    rideCount: count
+  }));
+}
+
+function getTopLocations(bookings, type) {
+  // Extract top 5 pickup or dropoff locations
+  const locationCounts = {};
+  
+  bookings.forEach(b => {
+    const location = type === 'pickup' ? b.pickup_location : b.dropoff_location;
+    if (location && location.city) {
+      locationCounts[location.city] = (locationCounts[location.city] || 0) + 1;
+    }
+  });
+
+  return Object.entries(locationCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5)
+    .map(([city, count]) => ({ city, count }));
+}
