@@ -60,11 +60,11 @@ CREATE TABLE guides (
 CREATE TABLE drivers (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    vehicle_type VARCHAR(20) NOT NULL,
-    vehicle_number VARCHAR(20) NOT NULL,
+    vehicle_type VARCHAR(20) NOT NULL CHECK (vehicle_type IN ('standard', 'air_conditioned', 'luxury')),
+    vehicle_number VARCHAR(20) NOT NULL UNIQUE,
     vehicle_model VARCHAR(100) NOT NULL,
     vehicle_year INTEGER NOT NULL,
-    license_number VARCHAR(50) NOT NULL,
+    license_number VARCHAR(50) NOT NULL UNIQUE,
     insurance_number VARCHAR(50) NOT NULL,
     max_passengers INTEGER DEFAULT 3,
     base_rate DECIMAL(10,2) NOT NULL,
@@ -81,6 +81,8 @@ CREATE TABLE drivers (
     last_location_update TIMESTAMP WITH TIME ZONE,
     verification_status VARCHAR(20) DEFAULT 'pending',
     verification_documents JSONB DEFAULT '[]',
+    subscription_tier VARCHAR(20) DEFAULT 'basic' CHECK (subscription_tier IN ('basic', 'premium')),
+    subscription_updated_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -169,6 +171,27 @@ CREATE TABLE community_updates (
     description TEXT NOT NULL,
     location JSONB NOT NULL,
     severity VARCHAR(20) DEFAULT 'medium',
+
+-- Guide Packages table
+CREATE TABLE guide_packages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guide_id UUID NOT NULL REFERENCES guides(id) ON DELETE CASCADE,
+    name VARCHAR(200) NOT NULL,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('half_day', 'full_day', 'multi_day', 'custom')),
+    duration INTEGER NOT NULL,
+    price DECIMAL(10,2) NOT NULL,
+    description TEXT NOT NULL,
+    inclusions TEXT[] DEFAULT '{}',
+    exclusions TEXT[] DEFAULT '{}',
+    max_group_size INTEGER DEFAULT 10,
+    available_days TEXT[] DEFAULT '{"monday","tuesday","wednesday","thursday","friday","saturday","sunday"}',
+    is_active BOOLEAN DEFAULT TRUE,
+    discount_percentage INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Community Updates table
     expires_at TIMESTAMP WITH TIME ZONE,
     images TEXT[] DEFAULT '{}',
     tags TEXT[] DEFAULT '{}',
@@ -178,6 +201,39 @@ CREATE TABLE community_updates (
     verified_by UUID REFERENCES users(id),
     verified_at TIMESTAMP WITH TIME ZONE,
     status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Events table
+CREATE TABLE events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(200) NOT NULL,
+    description TEXT NOT NULL,
+    start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    end_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    location JSONB NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    entry_fee DECIMAL(10,2) DEFAULT 0.00,
+    max_attendees INTEGER,
+    images TEXT[] DEFAULT '{}',
+
+-- Safety Incidents table (for ride safety features)
+CREATE TABLE safety_incidents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    driver_id UUID REFERENCES drivers(id) ON DELETE SET NULL,
+    incident_type VARCHAR(50) NOT NULL CHECK (incident_type IN ('sos', 'harassment', 'accident', 'route_deviation', 'other')),
+    description TEXT,
+    message TEXT,
+    location JSONB,
+    evidence TEXT[] DEFAULT '{}',
+    status VARCHAR(20) DEFAULT 'open' CHECK (status IN ('open', 'under_review', 'resolved', 'closed')),
+    resolved_at TIMESTAMP WITH TIME ZONE,
+    resolved_by UUID REFERENCES users(id),
+    resolution_notes TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
