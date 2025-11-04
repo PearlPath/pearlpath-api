@@ -399,15 +399,16 @@ const deleteGuide = async (req, res, next) => {
 
 module.exports = {
   createGuide,
-  getGuide,
+  getAllGuides,
+  getGuideById,
   updateGuide,
+  deleteGuide,
   searchGuides,
-  updateAvailability,
-  updateLocation,
-  addToPortfolio,
-  getGuideBookings,
-  getGuideStats,
-  deleteGuide
+  getGuidePackages,
+  upsertGuidePackage,
+  getAvailabilityCalendar,
+  checkInstantBooking,
+  getEarningsDashboard
 };
 
 // Get guide packages

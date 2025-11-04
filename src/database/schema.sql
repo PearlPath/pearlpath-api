@@ -169,6 +169,27 @@ CREATE TABLE community_updates (
     description TEXT NOT NULL,
     location JSONB NOT NULL,
     severity VARCHAR(20) DEFAULT 'medium',
+
+-- Guide Packages table
+CREATE TABLE guide_packages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guide_id UUID NOT NULL REFERENCES guides(id) ON DELETE CASCADE,
+    name VARCHAR(200) NOT NULL,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('half_day', 'full_day', 'multi_day', 'custom')),
+    duration INTEGER NOT NULL,
+    price DECIMAL(10,2) NOT NULL,
+    description TEXT NOT NULL,
+    inclusions TEXT[] DEFAULT '{}',
+    exclusions TEXT[] DEFAULT '{}',
+    max_group_size INTEGER DEFAULT 10,
+    available_days TEXT[] DEFAULT '{"monday","tuesday","wednesday","thursday","friday","saturday","sunday"}',
+    is_active BOOLEAN DEFAULT TRUE,
+    discount_percentage INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Community Updates table
     expires_at TIMESTAMP WITH TIME ZONE,
     images TEXT[] DEFAULT '{}',
     tags TEXT[] DEFAULT '{}',
