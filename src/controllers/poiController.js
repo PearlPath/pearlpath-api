@@ -514,3 +514,78 @@ module.exports = {
   getPOIsForReview,
   getPOIApprovalStats
 };
+
+// Helper function to get crowd level
+async function getCrowdLevel(poiId) {
+  try {
+    // This would typically integrate with real-time data
+    // For now, returning simulated data based on time and day
+    const now = new Date();
+    const hour = now.getHours();
+    const dayOfWeek = now.getDay();
+    
+    let level = 'low';
+    let percentage = 20;
+    
+    // Weekend logic
+    if (dayOfWeek === 0 || dayOfWeek === 6) {
+      percentage += 30;
+    }
+    
+    // Peak hours logic (9 AM - 5 PM)
+    if (hour >= 9 && hour <= 17) {
+      percentage += 25;
+    }
+    
+    // Determine level
+    if (percentage > 70) level = 'very_high';
+    else if (percentage > 50) level = 'high';
+    else if (percentage > 30) level = 'moderate';
+    
+    return {
+      level,
+      percentage,
+      lastUpdated: new Date().toISOString(),
+      description: getCrowdDescription(level)
+    };
+  } catch (error) {
+    logger.error('Error getting crowd level:', error);
+    return null;
+  }
+}
+
+function getCrowdDescription(level) {
+  const descriptions = {
+    low: 'Few people - Great time to visit',
+    moderate: 'Some crowds - Still comfortable',
+    high: 'Crowded - Expect wait times',
+    very_high: 'Very crowded - Consider visiting later'
+  };
+  return descriptions[level] || 'Unknown';
+}
+
+// Helper function to get recent safety alerts
+async function getRecentSafetyAlerts(poiId) {
+  try {
+    const { db } = require('../config/database');
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const { data, error } = await db.supabase
+      .from('community_updates')
+      .select('*')
+      .eq('location->>poi_id', poiId)
+      .in('type', ['closure', 'scam_alert', 'safety_alert'])
+      .gte('created_at', sevenDaysAgo.toISOString())
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(5);
+    
+    if (error) throw error;
+    
+    return data || [];
+  } catch (error) {
+    logger.error('Error getting safety alerts:', error);
+    return [];
+  }
+}
