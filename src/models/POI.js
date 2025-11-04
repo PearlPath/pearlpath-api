@@ -284,8 +284,75 @@ class POI {
       totalReviews: this.totalReviews,
       visitCount: this.visitCount,
       isVerified: this.isVerified,
+      approvalStatus: this.approvalStatus,
       status: this.getCurrentStatus()
     };
+  }
+
+  // Approve POI
+  async approve(reviewedBy) {
+    try {
+      const { data, error } = await db.supabase
+        .from('pois')
+        .update({
+          approval_status: 'approved',
+          reviewed_by: reviewedBy,
+          reviewed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', this.id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      Object.assign(this, data);
+      return this;
+    } catch (error) {
+      logger.error('Error approving POI:', error);
+      throw error;
+    }
+  }
+
+  // Reject POI
+  async reject(reviewedBy, reason) {
+    try {
+      const { data, error } = await db.supabase
+        .from('pois')
+        .update({
+          approval_status: 'rejected',
+          rejection_reason: reason,
+          reviewed_by: reviewedBy,
+          reviewed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', this.id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      Object.assign(this, data);
+      return this;
+    } catch (error) {
+      logger.error('Error rejecting POI:', error);
+      throw error;
+    }
+  }
+
+  // Static method to find POIs by approval status
+  static async findByApprovalStatus(status) {
+    try {
+      const { data, error } = await db.supabase
+        .from('pois')
+        .select('*')
+        .eq('approval_status', status)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      return data.map(poi => new POI(poi));
+    } catch (error) {
+      logger.error('Error finding POIs by approval status:', error);
+      throw error;
+    }
   }
 }
 

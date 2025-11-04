@@ -1,15 +1,60 @@
 const nodemailer = require('nodemailer');
 const logger = require('../utils/logger');
+const { google } = require('googleapis');
 
 class EmailService {
   constructor() {
-    this.transporter = nodemailer.createTransporter({
-      host: process.env.SMTP_HOST,
-      port: process.env.SMTP_PORT,
-      secure: false, // true for 465, false for other ports
+    // Configure for Google OAuth 2.0 or App Password
+    const useOAuth = process.env.SMTP_USE_OAUTH === 'true';
+    
+    if (useOAuth && process.env.SMTP_CLIENT_ID && process.env.SMTP_CLIENT_SECRET && process.env.SMTP_REFRESH_TOKEN) {
+      this.transporter = this.createOAuthTransporter();
+    } else {
+      // Use App Password for Gmail
+      this.transporter = nodemailer.createTransporter({
+        service: 'gmail',
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: process.env.SMTP_PORT || 587,
+        secure: false,
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS, // Use Gmail App Password here
+        },
+      });
+    }
+  }
+
+  createOAuthTransporter() {
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.SMTP_CLIENT_ID,
+      process.env.SMTP_CLIENT_SECRET,
+      process.env.SMTP_REDIRECT_URI || 'https://developers.google.com/oauthplayground'
+    );
+
+    oauth2Client.setCredentials({
+      refresh_token: process.env.SMTP_REFRESH_TOKEN,
+    });
+
+    return nodemailer.createTransporter({
+      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
       auth: {
+        type: 'OAuth2',
         user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+        clientId: process.env.SMTP_CLIENT_ID,
+        clientSecret: process.env.SMTP_CLIENT_SECRET,
+        refreshToken: process.env.SMTP_REFRESH_TOKEN,
+        accessToken: async () => {
+          try {
+            const { token } = await oauth2Client.getAccessToken();
+            return token;
+          } catch (error) {
+            logger.error('Error getting OAuth access token:', error);
+            throw error;
+          }
+        },
       },
     });
   }

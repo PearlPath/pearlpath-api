@@ -2,19 +2,49 @@ const POI = require('../models/POI');
 const { responseUtils } = require('../utils/helpers');
 const { handleNotFoundError } = require('../middleware/errorMiddleware');
 const logger = require('../utils/logger');
+const locationService = require('../services/locationService');
+const { cache } = require('../config/cache');
 
-// Create POI
+// Create POI with photo/video verification requirement
 const createPOI = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const poiData = { ...req.body, createdBy: userId };
+
+    // Require photo/video verification for all contributions
+    if (!poiData.images || poiData.images.length === 0) {
+      return res.status(400).json(responseUtils.error(
+        'Photo verification required. Please upload at least one image.',
+        400
+      ));
+    }
+
+    // Validate minimum image requirement (at least 1 photo)
+    if (poiData.images.length < 1) {
+      return res.status(400).json(responseUtils.error(
+        'At least one verification photo is required',
+        400
+      ));
+    }
+
+    // Check if location is in Sri Lanka
+    if (!locationService.isInSriLanka(poiData.latitude, poiData.longitude)) {
+      return res.status(400).json(responseUtils.error(
+        'POI must be located in Sri Lanka',
+        400
+      ));
+    }
 
     const poi = await POI.create(poiData);
 
     logger.info(`POI created: ${poi.id} by user: ${userId}`);
 
     res.status(201).json(responseUtils.success({
-      poi: poi.toSafeObject()
+      poi: poi.toSafeObject(),
+      approvalStatus: poi.approvalStatus,
+      message: poi.approvalStatus === 'needs_review' 
+        ? 'POI submitted for review due to similarity with existing locations'
+        : 'POI created and auto-approved'
     }, 'POI created successfully', 201));
   } catch (error) {
     next(error);
@@ -113,13 +143,36 @@ const searchPOIs = async (req, res, next) => {
   }
 };
 
-// Find nearby POIs
+// Find nearby POIs with enhanced features
 const findNearbyPOIs = async (req, res, next) => {
   try {
-    const { lat, lng, radius = 10, category } = req.query;
+    const { 
+      lat, 
+      lng, 
+      radius = 10, 
+      category,
+      filters = {},
+      includeWeather = false,
+      includeCrowdLevel = false 
+    } = req.query;
 
     if (!lat || !lng) {
       return res.status(400).json(responseUtils.error('Latitude and longitude are required', 400));
+    }
+
+    // Validate coordinates
+    const coordValidation = locationService.validateCoordinates(lat, lng);
+    if (!coordValidation.valid) {
+      return res.status(400).json(responseUtils.error(coordValidation.error, 400));
+    }
+
+    // Check cache first for performance
+    const cacheKey = `nearby_pois_${lat}_${lng}_${radius}_${category || 'all'}`;
+    const cachedResult = await cache.get(cacheKey);
+    
+    if (cachedResult) {
+      logger.debug(`Cache hit for nearby POIs: ${cacheKey}`);
+      return res.json(responseUtils.success(cachedResult, 'Nearby POIs found (cached)'));
     }
 
     const pois = await POI.findNearby(
@@ -129,20 +182,52 @@ const findNearbyPOIs = async (req, res, next) => {
       category
     );
 
-    // Calculate distances and add to response
-    const poisWithDistance = pois.map(poi => {
+    // Calculate distances and add enhanced data
+    const poisWithEnhancedData = await Promise.all(pois.map(async (poi) => {
       const distance = poi.calculateDistance(parseFloat(lat), parseFloat(lng));
-      return {
+      const poiData = {
         ...poi.toPublicObject(),
-        distance: distance ? Math.round(distance * 100) / 100 : null
+        distance: distance ? Math.round(distance * 100) / 100 : null,
+        distanceText: distance ? `${Math.round(distance * 10) / 10}km away` : null,
+        currentStatus: poi.getCurrentStatus()
       };
-    });
 
-    res.json(responseUtils.success({
-      pois: poisWithDistance,
-      total: poisWithDistance.length,
-      searchParams: { lat, lng, radius, category }
-    }, 'Nearby POIs found successfully'));
+      // Add crowd level if requested
+      if (includeCrowdLevel) {
+        poiData.crowdLevel = await getCrowdLevel(poi.id);
+      }
+
+      // Add recent safety updates
+      poiData.recentAlerts = await getRecentSafetyAlerts(poi.id);
+
+      return poiData;
+    }));
+
+    // Get current weather if requested
+    let weatherData = null;
+    if (includeWeather) {
+      try {
+        weatherData = await locationService.getCurrentWeather(parseFloat(lat), parseFloat(lng));
+      } catch (error) {
+        logger.warn('Failed to fetch weather data:', error);
+      }
+    }
+
+    const result = {
+      pois: poisWithEnhancedData,
+      total: poisWithEnhancedData.length,
+      weather: weatherData,
+      searchParams: { lat, lng, radius, category },
+      userLocation: {
+        lat: parseFloat(lat),
+        lng: parseFloat(lng)
+      }
+    };
+
+    // Cache results for 5 minutes
+    await cache.set(cacheKey, result, 300);
+
+    res.json(responseUtils.success(result, 'Nearby POIs found successfully'));
   } catch (error) {
     next(error);
   }
@@ -312,6 +397,106 @@ const deletePOI = async (req, res, next) => {
   }
 };
 
+// Approve POI (Admin only)
+const approvePOI = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    const poi = await POI.findById(id);
+    if (!poi) {
+      throw handleNotFoundError('POI not found');
+    }
+
+    await poi.approve(userId);
+
+    logger.info(`POI approved: ${id} by user: ${userId}`);
+
+    res.json(responseUtils.success({
+      poi: poi.toSafeObject()
+    }, 'POI approved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Reject POI (Admin only)
+const rejectPOI = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const userId = req.user.id;
+
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    if (!reason) {
+      return res.status(400).json(responseUtils.error('Rejection reason is required', 400));
+    }
+
+    const poi = await POI.findById(id);
+    if (!poi) {
+      throw handleNotFoundError('POI not found');
+    }
+
+    await poi.reject(userId, reason);
+
+    logger.info(`POI rejected: ${id} by user: ${userId}, reason: ${reason}`);
+
+    res.json(responseUtils.success({
+      poi: poi.toSafeObject()
+    }, 'POI rejected successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get POIs pending review (Admin only)
+const getPOIsForReview = async (req, res, next) => {
+  try {
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    const pois = await POI.findByApprovalStatus('needs_review');
+
+    res.json(responseUtils.success({
+      pois: pois.map(poi => poi.toSafeObject()),
+      total: pois.length
+    }, 'POIs pending review retrieved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get all POI approval statuses
+const getPOIApprovalStats = async (req, res, next) => {
+  try {
+    if (!['admin', 'moderator'].includes(req.user.role)) {
+      return res.status(403).json(responseUtils.error('Admin access required', 403));
+    }
+
+    const pending = await POI.findByApprovalStatus('pending');
+    const needsReview = await POI.findByApprovalStatus('needs_review');
+    const approved = await POI.findByApprovalStatus('approved');
+    const rejected = await POI.findByApprovalStatus('rejected');
+
+    res.json(responseUtils.success({
+      pending: pending.length,
+      needsReview: needsReview.length,
+      approved: approved.length,
+      rejected: rejected.length
+    }, 'POI approval stats retrieved successfully'));
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createPOI,
   getPOI,
@@ -323,5 +508,84 @@ module.exports = {
   verifyPOI,
   getPOIStatus,
   getPOIsByCategory,
-  deletePOI
+  deletePOI,
+  approvePOI,
+  rejectPOI,
+  getPOIsForReview,
+  getPOIApprovalStats
 };
+
+// Helper function to get crowd level
+async function getCrowdLevel(poiId) {
+  try {
+    // This would typically integrate with real-time data
+    // For now, returning simulated data based on time and day
+    const now = new Date();
+    const hour = now.getHours();
+    const dayOfWeek = now.getDay();
+    
+    let level = 'low';
+    let percentage = 20;
+    
+    // Weekend logic
+    if (dayOfWeek === 0 || dayOfWeek === 6) {
+      percentage += 30;
+    }
+    
+    // Peak hours logic (9 AM - 5 PM)
+    if (hour >= 9 && hour <= 17) {
+      percentage += 25;
+    }
+    
+    // Determine level
+    if (percentage > 70) level = 'very_high';
+    else if (percentage > 50) level = 'high';
+    else if (percentage > 30) level = 'moderate';
+    
+    return {
+      level,
+      percentage,
+      lastUpdated: new Date().toISOString(),
+      description: getCrowdDescription(level)
+    };
+  } catch (error) {
+    logger.error('Error getting crowd level:', error);
+    return null;
+  }
+}
+
+function getCrowdDescription(level) {
+  const descriptions = {
+    low: 'Few people - Great time to visit',
+    moderate: 'Some crowds - Still comfortable',
+    high: 'Crowded - Expect wait times',
+    very_high: 'Very crowded - Consider visiting later'
+  };
+  return descriptions[level] || 'Unknown';
+}
+
+// Helper function to get recent safety alerts
+async function getRecentSafetyAlerts(poiId) {
+  try {
+    const { db } = require('../config/database');
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const { data, error } = await db.supabase
+      .from('community_updates')
+      .select('*')
+      .eq('location->>poi_id', poiId)
+      .in('type', ['closure', 'scam_alert', 'safety_alert'])
+      .gte('created_at', sevenDaysAgo.toISOString())
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(5);
+    
+    if (error) throw error;
+    
+    return data || [];
+  } catch (error) {
+    logger.error('Error getting safety alerts:', error);
+    return [];
+  }
+}

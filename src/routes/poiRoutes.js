@@ -21,4 +21,10 @@ router.post('/:id/images', authenticateToken, validateId, poiController.addImage
 router.post('/:id/rate', authenticateToken, validateId, poiController.ratePOI);
 router.post('/:id/verify', authenticateToken, requireRole('admin', 'moderator'), validateId, poiController.verifyPOI);
 
+// Admin approval routes
+router.post('/:id/approve', authenticateToken, requireRole('admin', 'moderator'), validateId, poiController.approvePOI);
+router.post('/:id/reject', authenticateToken, requireRole('admin', 'moderator'), validateId, poiController.rejectPOI);
+router.get('/admin/review', authenticateToken, requireRole('admin', 'moderator'), poiController.getPOIsForReview);
+router.get('/admin/stats', authenticateToken, requireRole('admin', 'moderator'), poiController.getPOIApprovalStats);
+
 module.exports = router;
